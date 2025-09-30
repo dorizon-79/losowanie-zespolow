@@ -4,24 +4,23 @@ import random
 from io import BytesIO
 import unicodedata
 import difflib
+import qrcode
 
 st.set_page_config(page_title="Losowanie zespołów", layout="wide")
 st.title("👥 Losowanie osób do zespołów")
 
-# ===== współdzielony store między sesjami =====
+# ========== wspólny magazyn między sesjami ==========
 @st.cache_resource
 def get_store():
-    # przechowujemy zespoły + lookup + listę kluczy + mapę ładnych nazw
     return {
-        "balanced_teams": None,
-        "team_lookup": None,
-        "all_keys": [],
-        "display_name_map": {},  # key -> "Imię Nazwisko" z ogonkami
+        "balanced_teams": None,       # list[list[dict]]
+        "team_lookup": None,          # key -> {team_number, team_members}
+        "all_keys": [],               # list[str]
+        "display_name_map": {},       # key -> "Imię Nazwisko" z ogonkami
     }
-
 STORE = get_store()
 
-# ===== pomocnicze =====
+# ========== pomocnicze ==========
 def normalize_col(col): 
     return col.strip().lower().replace(".", "")
 
@@ -33,11 +32,9 @@ def squash_spaces(s: str) -> str:
     return " ".join((s or "").split())
 
 def norm_name(s: str) -> str:
-    # bez ogonków, małe litery, zbite spacje
     return squash_spaces(strip_accents(s)).lower()
 
 def build_keys(first_name: str, last_name: str):
-    # akceptujemy "imie nazwisko" i "nazwisko imie"
     key1 = norm_name(f"{first_name} {last_name}")
     key2 = norm_name(f"{last_name} {first_name}")
     return {key1, key2}
@@ -46,22 +43,52 @@ def build_lookup_from_teams(balanced_teams):
     team_lookup, all_keys, display_name_map = {}, [], {}
     for i, team in enumerate(balanced_teams):
         for p in team:
-            full_name_pretty = f"{p['Imię']} {p['Nazwisko']}".strip()
+            pretty = f"{p['Imię']} {p['Nazwisko']}".strip()
             for k in build_keys(p['Imię'], p['Nazwisko']):
                 team_lookup[k] = {"team_number": i + 1, "team_members": team}
                 all_keys.append(k)
-                # zapamiętaj ładny napis do wyświetlania w podpowiedziach
-                display_name_map[k] = full_name_pretty
+                display_name_map[k] = pretty
     return team_lookup, all_keys, display_name_map
+
+def make_qr_png(data: str) -> BytesIO:
+    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+# — query param 'view=ucz' blokuje tryb organizatora —
+def get_view_param():
+    # kompatybilnie dla różnych wersji Streamlit
+    try:
+        return st.query_params.get("view", None)
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()
+            return (qp.get("view") or [None])[0]
+        except Exception:
+            return None
 
 expected_cols_map = {
     'lp': 'Lp.','nazwisko': 'Nazwisko','imię': 'Imię','imi': 'Imię',
     'stanowisko': 'Stanowisko','dział': 'DZIAŁ','dzial': 'DZIAŁ'
 }
 
-mode = st.radio("Wybierz tryb", ["🎛️ Organizator", "🔍 Uczestnik"])
+# ========== wybór trybu (z blokadą) ==========
+view_param = (get_view_param() or "").lower()
+locked_participant = view_param in ("ucz", "participant", "u", "p")
 
-# ====== ORGANIZATOR ======
+if locked_participant:
+    mode = "🔍 Uczestnik"
+else:
+    mode = st.radio("Wybierz tryb", ["🎛️ Organizator", "🔍 Uczestnik"])
+
+# =============================================
+#                 ORGANIZATOR
+# =============================================
 if mode == "🎛️ Organizator":
     uploaded_file = st.file_uploader("📂 Wybierz plik Excel (.xlsx) z listą osób", type=["xlsx"])
 
@@ -76,7 +103,6 @@ if mode == "🎛️ Organizator":
                 st.error(f"❌ Brakuje kolumn: {', '.join([c for c in required if c not in mapped_cols])}")
             else:
                 df = df_raw.rename(columns={v:k for k,v in mapped_cols.items()})
-                # czyszczenie pól tekstowych
                 for col in ['Imię','Nazwisko','Stanowisko','DZIAŁ']:
                     df[col] = df[col].astype(str).map(squash_spaces)
 
@@ -105,47 +131,58 @@ if mode == "🎛️ Organizator":
 
                     st.session_state["balanced_teams"] = balanced
 
-                    # podgląd
+                # podgląd + publikacja
+                if st.session_state.get("balanced_teams"):
+                    st.markdown("### 📋 Podgląd zespołów")
                     cols = st.columns(num_teams)
                     for i, col in enumerate(cols):
                         col.markdown(f"### 👥 Zespół {i+1}")
-                        for p in balanced[i]:
+                        for p in st.session_state["balanced_teams"][i]:
                             col.markdown(f"- {p['Nazwisko']} {p['Imię']} ({p['DZIAŁ']})")
 
-                if st.session_state.get("balanced_teams"):
-                    # publikacja buduje lookup od zera -> spójność
+                    # publikacja (budujemy lookup od zera, do wspólnego STORE)
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
                         lookup, keys, display_map = build_lookup_from_teams(st.session_state["balanced_teams"])
                         STORE["balanced_teams"]   = st.session_state["balanced_teams"]
                         STORE["team_lookup"]      = lookup
                         STORE["all_keys"]         = keys
                         STORE["display_name_map"] = display_map
-                        st.success("✅ Opublikowano! Uczestnicy mogą już wyszukiwać.")
+                        st.success("✅ Opublikowano! Poniżej masz link i QR tylko dla uczestników.")
 
-                    # opcjonalnie: wyczyść publikację
-                    if st.button("🧹 Wyczyść publikację"):
-                        STORE["balanced_teams"]   = None
-                        STORE["team_lookup"]      = None
-                        STORE["all_keys"]         = []
-                        STORE["display_name_map"] = {}
-                        st.info("🧹 Publikacja wyczyszczona.")
+                    # po publikacji – link i QR tylko do wyszukiwarki
+                    if STORE["team_lookup"]:
+                        st.markdown("---")
+                        st.markdown("### 🔗 Link i QR dla uczestników (tylko wyszukiwarka)")
 
-                    # eksport
-                    def to_excel(teams):
-                        out = BytesIO()
-                        with pd.ExcelWriter(out, engine='openpyxl') as w:
-                            for i, t in enumerate(teams):
-                                pd.DataFrame(t)[['Nazwisko','Imię','Stanowisko','DZIAŁ']].to_excel(
-                                    w, index=False, sheet_name=f'Zespół {i+1}')
-                        out.seek(0); return out
-                    st.download_button("💾 Pobierz wyniki jako Excel",
-                        to_excel(st.session_state["balanced_teams"]),
-                        "wyniki_losowania.xlsx",
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        except Exception as e:
-            st.error(f"❌ Błąd: {e}")
+                        base_url = st.text_input(
+                            "Wklej adres Twojej aplikacji (bez parametrów):",
+                            placeholder="https://twoja-nazwa.streamlit.app"
+                        )
+                        if base_url:
+                            participant_url = base_url.rstrip("/") + "/?view=ucz"
+                            st.code(participant_url, language="text")
 
-# ====== UCZESTNIK ======
+                            png = make_qr_png(participant_url)
+                            st.image(png, caption="QR dla uczestników")
+                            st.download_button("📥 Pobierz QR (PNG)", data=png,
+                                file_name="qr_uczestnik.png", mime="image/png")
+
+                        # eksport XLSX (dla organizatora)
+                        def to_excel(teams):
+                            out = BytesIO()
+                            with pd.ExcelWriter(out, engine='openpyxl') as w:
+                                for i, t in enumerate(teams):
+                                    pd.DataFrame(t)[['Nazwisko','Imię','Stanowisko','DZIAŁ']].to_excel(
+                                        w, index=False, sheet_name=f'Zespół {i+1}')
+                            out.seek(0); return out
+                        st.download_button("💾 Pobierz wyniki jako Excel",
+                            to_excel(st.session_state["balanced_teams"]),
+                            "wyniki_losowania.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# =============================================
+#                 UCZESTNIK
+# =============================================
 if mode == "🔍 Uczestnik":
     if not STORE["team_lookup"]:
         st.warning("🔒 Wyniki nie są jeszcze opublikowane przez organizatora.")
@@ -160,7 +197,6 @@ if mode == "🔍 Uczestnik":
             info = STORE["team_lookup"].get(key)
 
             if not info:
-                # klikalne podpowiedzi z ŁADNYMI nazwami (z ogonkami)
                 suggestions = difflib.get_close_matches(key, STORE.get("all_keys", []), n=5, cutoff=0.75)
                 if suggestions:
                     st.info("🔎 Nie znaleziono dokładnego dopasowania. Może chodzi o:")
@@ -175,7 +211,6 @@ if mode == "🔍 Uczestnik":
             if selected_key:
                 info = STORE["team_lookup"].get(selected_key)
 
-        # pokaż wynik tylko jeśli faktycznie jest dopasowanie
         if info:
             st.success(f"✅ Jesteś w Zespole {info['team_number']}")
             st.markdown("👥 **Skład zespołu:**")
