@@ -1,4 +1,13 @@
+# --- Parametr widoku z URL + layout mobilny dla uczestnika ---
 import streamlit as st
+view_param = (st.query_params.get("view", "") or "").lower()
+locked_participant = view_param in {"ucz", "participant", "u", "p"}
+
+st.set_page_config(
+    page_title="Losowanie zespołów",
+    layout=("centered" if locked_participant else "wide"),
+)
+
 import pandas as pd
 import random
 from io import BytesIO
@@ -6,8 +15,39 @@ import unicodedata
 import difflib
 import qrcode
 
-st.set_page_config(page_title="Losowanie zespołów", layout="wide")
 st.title("👥 Losowanie osób do zespołów")
+
+# --- Usprawnienia mobilne: przewijanie + mniejsze marginesy + auto-scroll do inputu ---
+if locked_participant:
+    st.markdown("""
+    <style>
+      [data-testid="stToolbar"] { display: none !important; }
+      html, body, [data-testid="stAppViewContainer"], .block-container {
+          height: auto !important;
+          overflow: visible !important;
+      }
+      @media (max-width: 768px) {
+        .block-container { padding-top: 0.5rem !important; padding-bottom: 6rem !important; }
+        h1 { font-size: 1.6rem !important; }
+        h2 { font-size: 1.25rem !important; }
+      }
+    </style>
+    """, unsafe_allow_html=True)
+    import streamlit.components.v1 as components
+    components.html("""
+    <script>
+    window.addEventListener('load', function () {
+      const root = window.parent.document;
+      const inp = root.querySelector('input[type="text"]');
+      if (!inp) return;
+      ['focus','click'].forEach(ev => {
+        inp.addEventListener(ev, () => {
+          setTimeout(() => { inp.scrollIntoView({behavior:'smooth', block:'center'}); }, 150);
+        });
+      });
+    });
+    </script>
+    """, height=0)
 
 # ========= Wspólny magazyn (współdzielony między sesjami) =========
 @st.cache_resource
@@ -16,9 +56,8 @@ def get_store():
         "balanced_teams": None,       # list[list[dict]]
         "team_lookup": None,          # key -> {team_number, team_members}
         "all_keys": [],               # list[str]
-        "display_name_map": {},       # key -> "Imię Nazwisko" z ogonkami
+        "display_name_map": {},       # key -> "Imię Nazwisko" (z ogonkami) do ładnych podpowiedzi
     }
-
 STORE = get_store()
 
 # ======================= Pomocnicze =======================
@@ -63,20 +102,12 @@ def make_qr_png(data: str) -> BytesIO:
     buf.seek(0)
     return buf
 
-def get_view_param():
-    # prostsza i stabilna metoda na parametry URL
-    qp = st.experimental_get_query_params()
-    return (qp.get("view") or [None])[0]
-
 expected_cols_map = {
     'lp': 'Lp.','nazwisko': 'Nazwisko','imię': 'Imię','imi': 'Imię',
     'stanowisko': 'Stanowisko','dział': 'DZIAŁ','dzial': 'DZIAŁ'
 }
 
 # =================== Blokada trybu organizatora ===================
-view_param = (get_view_param() or "").lower()
-locked_participant = view_param in {"ucz", "participant", "u", "p"}
-
 if locked_participant:
     mode = "🔍 Uczestnik"
 else:
