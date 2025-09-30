@@ -11,13 +11,19 @@ st.title("👥 Losowanie osób do zespołów")
 # ===== współdzielony store między sesjami =====
 @st.cache_resource
 def get_store():
-    # spójny magazyn: zespoły + lookup + lista kluczy
-    return {"balanced_teams": None, "team_lookup": None, "all_keys": []}
+    # przechowujemy zespoły + lookup + listę kluczy + mapę ładnych nazw
+    return {
+        "balanced_teams": None,
+        "team_lookup": None,
+        "all_keys": [],
+        "display_name_map": {},  # key -> "Imię Nazwisko" z ogonkami
+    }
 
 STORE = get_store()
 
 # ===== pomocnicze =====
-def normalize_col(col): return col.strip().lower().replace(".", "")
+def normalize_col(col): 
+    return col.strip().lower().replace(".", "")
 
 def strip_accents(s: str) -> str:
     nfkd = unicodedata.normalize("NFKD", s or "")
@@ -37,13 +43,16 @@ def build_keys(first_name: str, last_name: str):
     return {key1, key2}
 
 def build_lookup_from_teams(balanced_teams):
-    team_lookup, all_keys = {}, []
+    team_lookup, all_keys, display_name_map = {}, [], {}
     for i, team in enumerate(balanced_teams):
         for p in team:
+            full_name_pretty = f"{p['Imię']} {p['Nazwisko']}".strip()
             for k in build_keys(p['Imię'], p['Nazwisko']):
                 team_lookup[k] = {"team_number": i + 1, "team_members": team}
                 all_keys.append(k)
-    return team_lookup, all_keys
+                # zapamiętaj ładny napis do wyświetlania w podpowiedziach
+                display_name_map[k] = full_name_pretty
+    return team_lookup, all_keys, display_name_map
 
 expected_cols_map = {
     'lp': 'Lp.','nazwisko': 'Nazwisko','imię': 'Imię','imi': 'Imię',
@@ -76,12 +85,14 @@ if mode == "🎛️ Organizator":
 
                 if st.button("🎯 Rozlosuj zespoły"):
                     participants = df.copy()
+
                     # 1) rozkład wg działów
                     raw_teams = [[] for _ in range(num_teams)]
                     for _, grp in participants.groupby("DZIAŁ"):
                         for i, person in enumerate(grp.sample(frac=1).to_dict("records")):
                             raw_teams[i % num_teams].append(person)
-                    # 2) wyrównanie
+
+                    # 2) wyrównanie liczebności
                     pool = [p for t in raw_teams for p in t]
                     random.shuffle(pool)
                     base, extra = len(pool)//num_teams, len(pool)%num_teams
@@ -102,19 +113,21 @@ if mode == "🎛️ Organizator":
                             col.markdown(f"- {p['Nazwisko']} {p['Imię']} ({p['DZIAŁ']})")
 
                 if st.session_state.get("balanced_teams"):
-                    # publikacja buduje lookup od zera -> spójnie
+                    # publikacja buduje lookup od zera -> spójność
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
-                        lookup, keys = build_lookup_from_teams(st.session_state["balanced_teams"])
-                        STORE["balanced_teams"] = st.session_state["balanced_teams"]
-                        STORE["team_lookup"] = lookup
-                        STORE["all_keys"] = keys
+                        lookup, keys, display_map = build_lookup_from_teams(st.session_state["balanced_teams"])
+                        STORE["balanced_teams"]   = st.session_state["balanced_teams"]
+                        STORE["team_lookup"]      = lookup
+                        STORE["all_keys"]         = keys
+                        STORE["display_name_map"] = display_map
                         st.success("✅ Opublikowano! Uczestnicy mogą już wyszukiwać.")
 
                     # opcjonalnie: wyczyść publikację
                     if st.button("🧹 Wyczyść publikację"):
-                        STORE["balanced_teams"] = None
-                        STORE["team_lookup"] = None
-                        STORE["all_keys"] = []
+                        STORE["balanced_teams"]   = None
+                        STORE["team_lookup"]      = None
+                        STORE["all_keys"]         = []
+                        STORE["display_name_map"] = {}
                         st.info("🧹 Publikacja wyczyszczona.")
 
                     # eksport
@@ -140,29 +153,31 @@ if mode == "🔍 Uczestnik":
         st.subheader("🔍 Sprawdź swój zespół")
         full_name_in = st.text_input("Wpisz imię i nazwisko **lub** nazwisko i imię (dokładnie):")
         selected_key = None
+        info = None
 
         if full_name_in:
             key = norm_name(full_name_in)
             info = STORE["team_lookup"].get(key)
 
             if not info:
-                # klikalne podpowiedzi
+                # klikalne podpowiedzi z ŁADNYMI nazwami (z ogonkami)
                 suggestions = difflib.get_close_matches(key, STORE.get("all_keys", []), n=5, cutoff=0.75)
                 if suggestions:
-                    st.error("❌ Nie znaleziono takiej osoby. Może chodzi o:")
+                    st.info("🔎 Nie znaleziono dokładnego dopasowania. Może chodzi o:")
                     cols = st.columns(min(len(suggestions), 5))
                     for i, s in enumerate(suggestions):
-                        if cols[i].button(s.title(), key=f"sugg_{i}"):
+                        pretty = STORE["display_name_map"].get(s, s.title())
+                        if cols[i].button(pretty, key=f"sugg_{i}"):
                             selected_key = s
                 else:
                     st.error("❌ Nie znaleziono takiej osoby.")
 
-            # jeżeli kliknięto podpowiedź – pokaż wynik
             if selected_key:
                 info = STORE["team_lookup"].get(selected_key)
 
-            if info:
-                st.success(f"✅ Jesteś w Zespole {info['team_number']}")
-                st.markdown("👥 **Skład zespołu:**")
-                for m in info["team_members"]:
-                    st.markdown(f"- {m['Nazwisko']} {m['Imię']} ({m['DZIAŁ']})")
+        # pokaż wynik tylko jeśli faktycznie jest dopasowanie
+        if info:
+            st.success(f"✅ Jesteś w Zespole {info['team_number']}")
+            st.markdown("👥 **Skład zespołu:**")
+            for m in info["team_members"]:
+                st.markdown(f"- {m['Nazwisko']} {m['Imię']} ({m['DZIAŁ']})")
