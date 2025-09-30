@@ -15,7 +15,9 @@ import unicodedata
 import difflib
 import qrcode
 
-st.title("👥 Losowanie osób do zespołów")
+# Krótszy tytuł w widoku uczestnika (telefon), pełny u organizatora
+title_text = "👥 Losowanie Zespołów" if locked_participant else "👥 Losowanie osób do zespołów"
+st.title(title_text)
 
 # --- Usprawnienia mobilne: przewijanie + mniejsze marginesy + auto-scroll do inputu ---
 if locked_participant:
