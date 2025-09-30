@@ -11,13 +11,13 @@ st.title("👥 Losowanie osób do zespołów")
 # ===== współdzielony store między sesjami =====
 @st.cache_resource
 def get_store():
+    # spójny magazyn: zespoły + lookup + lista kluczy
     return {"balanced_teams": None, "team_lookup": None, "all_keys": []}
 
 STORE = get_store()
 
 # ===== pomocnicze =====
-def normalize_col(col):
-    return col.strip().lower().replace(".", "")
+def normalize_col(col): return col.strip().lower().replace(".", "")
 
 def strip_accents(s: str) -> str:
     nfkd = unicodedata.normalize("NFKD", s or "")
@@ -36,14 +36,18 @@ def build_keys(first_name: str, last_name: str):
     key2 = norm_name(f"{last_name} {first_name}")
     return {key1, key2}
 
+def build_lookup_from_teams(balanced_teams):
+    team_lookup, all_keys = {}, []
+    for i, team in enumerate(balanced_teams):
+        for p in team:
+            for k in build_keys(p['Imię'], p['Nazwisko']):
+                team_lookup[k] = {"team_number": i + 1, "team_members": team}
+                all_keys.append(k)
+    return team_lookup, all_keys
+
 expected_cols_map = {
-    'lp': 'Lp.',
-    'nazwisko': 'Nazwisko',
-    'imię': 'Imię',
-    'imi': 'Imię',
-    'stanowisko': 'Stanowisko',
-    'dział': 'DZIAŁ',
-    'dzial': 'DZIAŁ'
+    'lp': 'Lp.','nazwisko': 'Nazwisko','imię': 'Imię','imi': 'Imię',
+    'stanowisko': 'Stanowisko','dział': 'DZIAŁ','dzial': 'DZIAŁ'
 }
 
 mode = st.radio("Wybierz tryb", ["🎛️ Organizator", "🔍 Uczestnik"])
@@ -56,97 +60,75 @@ if mode == "🎛️ Organizator":
         try:
             df_raw = pd.read_excel(uploaded_file)
             cleaned_cols = [normalize_col(c) for c in df_raw.columns]
-            mapped_cols = {}
-            for i, col in enumerate(cleaned_cols):
-                if col in expected_cols_map:
-                    mapped_cols[expected_cols_map[col]] = df_raw.columns[i]
-
-            required_keys = ['Lp.', 'Nazwisko', 'Imię', 'Stanowisko', 'DZIAŁ']
-            if not all(col in mapped_cols for col in required_keys):
-                missing = [col for col in required_keys if col not in mapped_cols]
-                st.error(f"❌ Brakuje kolumn: {', '.join(missing)}")
+            mapped_cols = { expected_cols_map[c]: df_raw.columns[i]
+                            for i, c in enumerate(cleaned_cols) if c in expected_cols_map }
+            required = ['Lp.', 'Nazwisko', 'Imię', 'Stanowisko', 'DZIAŁ']
+            if not all(c in mapped_cols for c in required):
+                st.error(f"❌ Brakuje kolumn: {', '.join([c for c in required if c not in mapped_cols])}")
             else:
-                df = df_raw.rename(columns={v: k for k, v in mapped_cols.items()})
-
-                # --- KLUCZOWA NOWOŚĆ: czyszczenie pól tekstowych ---
-                for col in ['Imię', 'Nazwisko', 'Stanowisko', 'DZIAŁ']:
+                df = df_raw.rename(columns={v:k for k,v in mapped_cols.items()})
+                # czyszczenie pól tekstowych
+                for col in ['Imię','Nazwisko','Stanowisko','DZIAŁ']:
                     df[col] = df[col].astype(str).map(squash_spaces)
 
                 st.success(f"✅ Plik wczytany. Osób: {len(df)}")
-
-                num_teams = st.number_input("🔢 Liczba zespołów", min_value=2, max_value=20, value=7)
+                num_teams = st.number_input("🔢 Liczba zespołów", 2, 20, 7)
 
                 if st.button("🎯 Rozlosuj zespoły"):
                     participants = df.copy()
-
                     # 1) rozkład wg działów
-                    teams = [[] for _ in range(num_teams)]
-                    for _, group in participants.groupby("DZIAŁ"):
-                        shuffled = group.sample(frac=1).to_dict("records")
-                        for i, person in enumerate(shuffled):
-                            teams[i % num_teams].append(person)
-
-                    # 2) wyrównanie liczebności
-                    flat_people = [p for team in teams for p in team]
-                    random.shuffle(flat_people)
-                    base = len(flat_people) // num_teams
-                    extra = len(flat_people) % num_teams
-
-                    balanced_teams = []
-                    start = 0
+                    raw_teams = [[] for _ in range(num_teams)]
+                    for _, grp in participants.groupby("DZIAŁ"):
+                        for i, person in enumerate(grp.sample(frac=1).to_dict("records")):
+                            raw_teams[i % num_teams].append(person)
+                    # 2) wyrównanie
+                    pool = [p for t in raw_teams for p in t]
+                    random.shuffle(pool)
+                    base, extra = len(pool)//num_teams, len(pool)%num_teams
+                    balanced = []
+                    s = 0
                     for i in range(num_teams):
                         size = base + (1 if i < extra else 0)
-                        team = sorted(flat_people[start:start+size], key=lambda x: x["Nazwisko"])
-                        balanced_teams.append(team)
-                        start += size
+                        team = sorted(pool[s:s+size], key=lambda x: x["Nazwisko"])
+                        balanced.append(team); s += size
 
-                    # 3) lookup (oba układy + normalizacja)
-                    team_lookup = {}
-                    all_keys = []
-                    for i, team in enumerate(balanced_teams):
-                        for person in team:
-                            for key in build_keys(person['Imię'], person['Nazwisko']):
-                                team_lookup[key] = {"team_number": i + 1, "team_members": team}
-                                all_keys.append(key)
-
-                    # zapisz do sesji
-                    st.session_state["balanced_teams"] = balanced_teams
-                    st.session_state["team_lookup"] = team_lookup
-                    st.session_state["all_keys"] = all_keys
+                    st.session_state["balanced_teams"] = balanced
 
                     # podgląd
                     cols = st.columns(num_teams)
                     for i, col in enumerate(cols):
-                        col.markdown(f"### 👥 Zespół {i + 1}")
-                        for person in balanced_teams[i]:
-                            col.markdown(f"- {person['Nazwisko']} {person['Imię']} ({person['DZIAŁ']})")
+                        col.markdown(f"### 👥 Zespół {i+1}")
+                        for p in balanced[i]:
+                            col.markdown(f"- {p['Nazwisko']} {p['Imię']} ({p['DZIAŁ']})")
 
-                # publikacja do wspólnego magazynu
                 if st.session_state.get("balanced_teams"):
+                    # publikacja buduje lookup od zera -> spójnie
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
+                        lookup, keys = build_lookup_from_teams(st.session_state["balanced_teams"])
                         STORE["balanced_teams"] = st.session_state["balanced_teams"]
-                        STORE["team_lookup"] = st.session_state["team_lookup"]
-                        STORE["all_keys"] = st.session_state["all_keys"]
-                        st.success("✅ Opublikowano! Uczestnicy mogą już wyszukiwać swoje zespoły.")
+                        STORE["team_lookup"] = lookup
+                        STORE["all_keys"] = keys
+                        st.success("✅ Opublikowano! Uczestnicy mogą już wyszukiwać.")
 
-                    # eksport XLSX
+                    # opcjonalnie: wyczyść publikację
+                    if st.button("🧹 Wyczyść publikację"):
+                        STORE["balanced_teams"] = None
+                        STORE["team_lookup"] = None
+                        STORE["all_keys"] = []
+                        st.info("🧹 Publikacja wyczyszczona.")
+
+                    # eksport
                     def to_excel(teams):
-                        output = BytesIO()
-                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                            for i, team in enumerate(teams):
-                                team_df = pd.DataFrame(team)
-                                team_df = team_df[['Nazwisko', 'Imię', 'Stanowisko', 'DZIAŁ']]
-                                team_df.to_excel(writer, index=False, sheet_name=f'Zespół {i+1}')
-                        output.seek(0)
-                        return output
-
-                    excel_data = to_excel(st.session_state["balanced_teams"])
-                    st.download_button(
-                        label="💾 Pobierz wyniki jako Excel",
-                        data=excel_data,
-                        file_name="wyniki_losowania.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                        out = BytesIO()
+                        with pd.ExcelWriter(out, engine='openpyxl') as w:
+                            for i, t in enumerate(teams):
+                                pd.DataFrame(t)[['Nazwisko','Imię','Stanowisko','DZIAŁ']].to_excel(
+                                    w, index=False, sheet_name=f'Zespół {i+1}')
+                        out.seek(0); return out
+                    st.download_button("💾 Pobierz wyniki jako Excel",
+                        to_excel(st.session_state["balanced_teams"]),
+                        "wyniki_losowania.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as e:
             st.error(f"❌ Błąd: {e}")
 
@@ -157,22 +139,30 @@ if mode == "🔍 Uczestnik":
     else:
         st.subheader("🔍 Sprawdź swój zespół")
         full_name_in = st.text_input("Wpisz imię i nazwisko **lub** nazwisko i imię (dokładnie):")
+        selected_key = None
 
         if full_name_in:
             key = norm_name(full_name_in)
             info = STORE["team_lookup"].get(key)
 
-            if info:
-                st.success(f"✅ Jesteś w Zespole {info['team_number']}")
-                st.markdown("👥 **Skład zespołu:**")
-                for member in info["team_members"]:
-                    st.markdown(f"- {member['Nazwisko']} {member['Imię']} ({member['DZIAŁ']})")
-            else:
-                # sugestie gdy wpis jest „bliski”
+            if not info:
+                # klikalne podpowiedzi
                 suggestions = difflib.get_close_matches(key, STORE.get("all_keys", []), n=5, cutoff=0.75)
                 if suggestions:
                     st.error("❌ Nie znaleziono takiej osoby. Może chodzi o:")
-                    for s in suggestions:
-                        st.markdown(f"- {s.title()}")
+                    cols = st.columns(min(len(suggestions), 5))
+                    for i, s in enumerate(suggestions):
+                        if cols[i].button(s.title(), key=f"sugg_{i}"):
+                            selected_key = s
                 else:
                     st.error("❌ Nie znaleziono takiej osoby.")
+
+            # jeżeli kliknięto podpowiedź – pokaż wynik
+            if selected_key:
+                info = STORE["team_lookup"].get(selected_key)
+
+            if info:
+                st.success(f"✅ Jesteś w Zespole {info['team_number']}")
+                st.markdown("👥 **Skład zespołu:**")
+                for m in info["team_members"]:
+                    st.markdown(f"- {m['Nazwisko']} {m['Imię']} ({m['DZIAŁ']})")
