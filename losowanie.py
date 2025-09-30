@@ -15,6 +15,26 @@ import unicodedata
 import difflib
 import qrcode
 
+# ============ Prosta autoryzacja ============
+PASSWORD = st.secrets.get("APP_PASSWORD", "warsztaty")
+
+def check_password() -> bool:
+    if st.session_state.get("authed", False):
+        return True
+    st.markdown("### 🔒 Dostęp chroniony hasłem")
+    with st.form("login"):
+        pwd = st.text_input("Hasło", type="password", placeholder="wpisz hasło…")
+        ok = st.form_submit_button("Zaloguj")
+    if ok:
+        if pwd == PASSWORD:
+            st.session_state["authed"] = True
+            st.rerun()
+        else:
+            st.error("Nieprawidłowe hasło.")
+    st.stop()
+
+check_password()
+
 # Krótszy tytuł w widoku uczestnika (telefon), pełny u organizatora
 title_text = "👥 Losowanie Zespołów" if locked_participant else "👥 Losowanie osób do zespołów"
 st.title(title_text)
@@ -58,7 +78,7 @@ def get_store():
         "balanced_teams": None,       # list[list[dict]]
         "team_lookup": None,          # key -> {team_number, team_members}
         "all_keys": [],               # list[str]
-        "display_name_map": {},       # key -> "Imię Nazwisko" (z ogonkami) do ładnych podpowiedzi
+        "display_name_map": {},       # key -> "Imię Nazwisko" (z ogonkami)
     }
 STORE = get_store()
 
