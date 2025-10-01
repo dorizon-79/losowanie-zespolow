@@ -19,7 +19,6 @@ import qrcode
 ORGANIZER_PASSWORD = st.secrets.get("ORGANIZER_PASSWORD", "warsztaty")
 
 def require_organizer_password():
-    """Wyświetla formularz hasła dla organizatora. Uczestnik nie jest blokowany."""
     if st.session_state.get("authed", False):
         return
     st.markdown("### 🔒 Dostęp organizatora")
@@ -93,11 +92,9 @@ def squash_spaces(s: str) -> str:
     return " ".join((s or "").split())
 
 def norm_name(s: str) -> str:
-    # bez ogonków, małe litery, zbite spacje
     return squash_spaces(strip_accents(s)).lower()
 
 def build_keys(first_name: str, last_name: str):
-    # akceptujemy "imie nazwisko" i "nazwisko imie"
     key1 = norm_name(f"{first_name} {last_name}")
     key2 = norm_name(f"{last_name} {first_name}")
     return {key1, key2}
@@ -136,19 +133,16 @@ else:
 
 # ========================== ORGANIZATOR ==========================
 if mode == "🎛️ Organizator":
-    # <<< hasło tylko w tym widoku >>>
     require_organizer_password()
 
     uploaded_file = st.file_uploader("📂 Wybierz plik Excel (.xlsx) z listą osób", type=["xlsx"])
 
     if uploaded_file:
-        # czytanie Excela z obsługą błędów
         try:
             df_raw = pd.read_excel(uploaded_file)
         except Exception as e:
             st.error(f"❌ Błąd odczytu pliku: {e}")
         else:
-            # mapowanie nagłówków
             cleaned_cols = [normalize_col(c) for c in df_raw.columns]
             mapped_cols = { expected_cols_map[c]: df_raw.columns[i]
                             for i, c in enumerate(cleaned_cols) if c in expected_cols_map }
@@ -157,7 +151,6 @@ if mode == "🎛️ Organizator":
                 st.error(f"❌ Brakuje kolumn: {', '.join([c for c in required if c not in mapped_cols])}")
             else:
                 df = df_raw.rename(columns={v:k for k,v in mapped_cols.items()})
-                # czyszczenie pól
                 for col in ['Imię','Nazwisko','Stanowisko','DZIAŁ']:
                     df[col] = df[col].astype(str).map(squash_spaces)
 
@@ -166,40 +159,65 @@ if mode == "🎛️ Organizator":
 
                 if st.button("🎯 Rozlosuj zespoły"):
                     participants = df.copy()
+                    N = len(participants)
+                    K = num_teams
 
-                    # 1) rozkład wg działów (tasowanie w obrębie działów)
-                    tmp_teams = [[] for _ in range(num_teams)]
-                    for _, grp in participants.groupby("DZIAŁ"):
-                        shuffled = grp.sample(frac=1).to_dict("records")
-                        for i, person in enumerate(shuffled):
-                            tmp_teams[i % num_teams].append(person)
+                    # Docelowe rozmiary zespołów (różnica ≤ 1)
+                    base = N // K
+                    extra = N % K
+                    targets = [base + (1 if i < extra else 0) for i in range(K)]
 
-                    # 2) wyrównanie liczebności (różnica ≤ 1)
-                    pool = [p for t in tmp_teams for p in t]
-                    random.shuffle(pool)
-                    base, extra = len(pool)//num_teams, len(pool)%num_teams
-                    balanced = []
-                    s = 0
-                    for i in range(num_teams):
-                        size = base + (1 if i < extra else 0)
-                        team = sorted(pool[s:s+size], key=lambda x: x["Nazwisko"])
-                        balanced.append(team); s += size
+                    # Puste zespoły + licznik zajętości
+                    teams = [[] for _ in range(K)]
+                    sizes = [0] * K
 
-                    st.session_state["balanced_teams"] = balanced
+                    # Aby nie faworyzować kolejności działów – tasujemy ich listę
+                    depts = list(participants.groupby("DZIAŁ"))
+                    random.shuffle(depts)
+
+                    # Przydział działami – rundami – z poszanowaniem capacity (targets)
+                    for dept, group in depts:
+                        members = group.sample(frac=1).to_dict("records")  # tasujemy osoby w dziale
+                        # RUNDY: najpierw po 1 na zespół (z capacity), potem nadwyżki
+                        while members:
+                            # kandydaci: zespoły z wolnym miejscem
+                            candidates = [i for i in range(K) if sizes[i] < targets[i]]
+                            if not candidates:
+                                # teoretycznie nie powinno się zdarzyć, ale na wszelki wypadek
+                                candidates = list(range(K))
+                            random.shuffle(candidates)  # aby nadwyżki szły losowo
+                            for ti in candidates:
+                                if not members:
+                                    break
+                                # przydziel 1 osobę z tego działu do zespołu 'ti'
+                                person = members.pop()
+                                teams[ti].append(person)
+                                sizes[ti] += 1
+                                # nie dodajemy więcej z tego działu do tego zespołu w tej rundzie,
+                                # bo idziemy dalej po kandydatach -> "po jednej zanim zaczniemy dublować"
+
+                    # Sortowanie w zespołach po nazwisku do prezentacji/eksportu
+                    for i in range(K):
+                        teams[i] = sorted(teams[i], key=lambda x: x["Nazwisko"])
+
+                    st.session_state["balanced_teams"] = teams
 
                 # podgląd + publikacja
                 if st.session_state.get("balanced_teams"):
+                    teams = st.session_state["balanced_teams"]
+                    K = len(teams)
+
                     st.markdown("### 📋 Podgląd zespołów")
-                    cols = st.columns(num_teams)
+                    cols = st.columns(K)
                     for i, col in enumerate(cols):
                         col.markdown(f"### 👥 Zespół {i+1}")
-                        for p in st.session_state["balanced_teams"][i]:
+                        for p in teams[i]:
                             # BEZ DZIAŁU
                             col.markdown(f"- {p['Nazwisko']} {p['Imię']}")
 
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
-                        lookup, keys, display_map = build_lookup_from_teams(st.session_state["balanced_teams"])
-                        STORE["balanced_teams"]   = st.session_state["balanced_teams"]
+                        lookup, keys, display_map = build_lookup_from_teams(teams)
+                        STORE["balanced_teams"]   = teams
                         STORE["team_lookup"]      = lookup
                         STORE["all_keys"]         = keys
                         STORE["display_name_map"] = display_map
@@ -220,7 +238,7 @@ if mode == "🎛️ Organizator":
                             st.download_button("📥 Pobierz QR (PNG)", data=png,
                                 file_name="qr_uczestnik.png", mime="image/png")
 
-                        # eksport XLSX (dla organizatora pełne dane – jeśli chcesz, mogę okroić)
+                        # eksport XLSX (dla organizatora pełne dane)
                         def to_excel(teams):
                             out = BytesIO()
                             with pd.ExcelWriter(out, engine='openpyxl') as w:
@@ -229,11 +247,10 @@ if mode == "🎛️ Organizator":
                                         w, index=False, sheet_name=f'Zespół {i+1}')
                             out.seek(0); return out
                         st.download_button("💾 Pobierz wyniki jako Excel",
-                            to_excel(st.session_state["balanced_teams"]),
+                            to_excel(teams),
                             "wyniki_losowania.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-                    # Opcjonalnie: wylogowanie organizatora
                     if st.button("🚪 Wyloguj organizatora"):
                         st.session_state["authed"] = False
                         st.success("Wylogowano.")
@@ -249,8 +266,11 @@ if mode == "🔍 Uczestnik":
         selected_key = None
         info = None
 
+        def norm_query(q: str) -> str:
+            return norm_name(q)
+
         if full_name_in:
-            key = norm_name(full_name_in)
+            key = norm_query(full_name_in)
             info = STORE["team_lookup"].get(key)
 
             if not info:
