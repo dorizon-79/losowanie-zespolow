@@ -5,10 +5,9 @@ view_param = (st.query_params.get("view", "") or "").lower()
 locked_participant = view_param in {"ucz", "participant", "u", "p"}
 locked_screen      = view_param in {"screen", "prezentacja", "ekran"}  # widok prezentacyjny
 
-st.set_page_config(
-    page_title="Losowanie zespołów",
-    layout=("centered" if (locked_participant or locked_screen) else "wide"),
-)
+# 👉 EKRAN = wide, UCZESTNIK = centered, reszta = wide
+layout_mode = "wide" if locked_screen else ("centered" if locked_participant else "wide")
+st.set_page_config(page_title="Losowanie zespołów", layout=layout_mode)
 
 import pandas as pd
 import random
@@ -45,22 +44,32 @@ def require_organizer_password():
 title_text = "👥 Losowanie Zespołów" if (locked_participant or locked_screen) else "👥 Losowanie osób do zespołów"
 st.title(title_text)
 
-# --- Usprawnienia mobilne i ekranowe: przewijanie + mniejsze marginesy + style kart zespołów ---
+# --- Usprawnienia mobilne i ekranowe ---
 if locked_participant or locked_screen:
-    st.markdown("""
+    # 👉 dla EKRANU: pełna szerokość, brak max-width, responsywne fonty
+    st.markdown(f"""
     <style>
-      [data-testid="stToolbar"] { display: none !important; }
-      html, body, [data-testid="stAppViewContainer"], .block-container {
-          height: auto !important; overflow: visible !important;
-      }
-      @media (max-width: 768px) {
-        .block-container { padding-top: .5rem !important; padding-bottom: 6rem !important; }
-        h1 { font-size: 1.6rem !important; }
-        h2 { font-size: 1.25rem !important; }
-      }
-      /* Karty zespołów - widok ekranowy */
-      .team-card h3 { font-size: 1.4rem; margin: 0 0 .25rem 0; }
-      .team-card li { font-size: 1.15rem; line-height: 1.4; }
+      [data-testid="stToolbar"], footer {{ display: none !important; }}
+      header {{ visibility: hidden; }} /* pasek tytułu Streamlit */
+      /* pełna szerokość kontenera */
+      .block-container {{
+          max-width: 100vw !important;
+          padding-left: 1rem !important;
+          padding-right: 1rem !important;
+          padding-top: 0.5rem !important;
+          padding-bottom: 2rem !important;
+      }}
+      [data-testid="stAppViewContainer"] {{ padding: 0 !important; }}
+
+      /* tytuły responsywnie */
+      h1 {{ font-size: clamp(18px, 2.2vw, 36px) !important; margin: .2rem 0 1rem; }}
+      .team-card h3 {{ font-size: clamp(16px, 1.4vw, 24px); margin: 0 0 .25rem 0; }}
+      .team-card ul {{ margin: .25rem 0 .75rem 1.1rem; padding: 0; }}
+      .team-card li {{ font-size: clamp(12px, 1.05vw, 18px); line-height: 1.35; margin: .1rem 0; }}
+      @media (max-width: 768px) {{
+        .block-container {{ padding-bottom: 6rem !important; }}
+        h1 {{ font-size: 1.6rem !important; }}
+      }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -136,6 +145,9 @@ def make_qr_png(data: str) -> BytesIO:
     return buf
 
 # ---------- PowerPoint: generator prezentacji ----------
+from pptx import Presentation
+from pptx.util import Inches, Pt
+
 def _font_size_for_count(n_total: int) -> int:
     if n_total <= 10:   return 36
     if n_total <= 16:   return 30
@@ -152,6 +164,7 @@ def make_pptx(teams, title="Losowanie Zespołów") -> BytesIO:
     slide = prs.slides.add_slide(prs.slide_layouts[0])
     slide.shapes.title.text = title
     try:
+        from datetime import datetime
         slide.placeholders[1].text = datetime.now().strftime("Wyniki losowania · %Y-%m-%d %H:%M")
     except Exception:
         pass
@@ -331,7 +344,6 @@ if mode == "🎛️ Organizator":
                     for i, col in enumerate(cols):
                         col.markdown(f"### 👥 Zespół {i+1}")
                         for p in teams[i]:
-                            # Bez działu
                             col.markdown(f"- {p['Nazwisko']} {p['Imię']}")
 
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
