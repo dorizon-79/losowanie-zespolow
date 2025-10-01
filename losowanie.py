@@ -1,11 +1,13 @@
-# --- Parametr widoku z URL + layout mobilny dla uczestnika ---
+# --- Tryb widoku z URL + layout mobilny/ekranowy ---
 import streamlit as st
+
 view_param = (st.query_params.get("view", "") or "").lower()
 locked_participant = view_param in {"ucz", "participant", "u", "p"}
+locked_screen      = view_param in {"screen", "prezentacja", "ekran"}  # widok prezentacyjny
 
 st.set_page_config(
     page_title="Losowanie zespołów",
-    layout=("centered" if locked_participant else "wide"),
+    layout=("centered" if (locked_participant or locked_screen) else "wide"),
 )
 
 import pandas as pd
@@ -14,11 +16,17 @@ from io import BytesIO
 import unicodedata
 import difflib
 import qrcode
+from datetime import datetime
+
+# --- PowerPoint ---
+from pptx import Presentation
+from pptx.util import Inches, Pt
 
 # =================== Hasło tylko dla organizatora ===================
 ORGANIZER_PASSWORD = st.secrets.get("ORGANIZER_PASSWORD", "warsztaty")
 
 def require_organizer_password():
+    """Hasło wymagane wyłącznie w widoku organizatora."""
     if st.session_state.get("authed", False):
         return
     st.markdown("### 🔒 Dostęp organizatora")
@@ -33,26 +41,31 @@ def require_organizer_password():
             st.error("Nieprawidłowe hasło.")
     st.stop()
 
-# Krótszy tytuł w widoku uczestnika (telefon), pełny u organizatora
-title_text = "👥 Losowanie Zespołów" if locked_participant else "👥 Losowanie osób do zespołów"
+# Krótszy tytuł w widoku uczestnika/ekranu, pełny u organizatora
+title_text = "👥 Losowanie Zespołów" if (locked_participant or locked_screen) else "👥 Losowanie osób do zespołów"
 st.title(title_text)
 
-# --- Usprawnienia mobilne: przewijanie + mniejsze marginesy + auto-scroll do inputu ---
-if locked_participant:
+# --- Usprawnienia mobilne i ekranowe: przewijanie + mniejsze marginesy + style kart zespołów ---
+if locked_participant or locked_screen:
     st.markdown("""
     <style>
       [data-testid="stToolbar"] { display: none !important; }
       html, body, [data-testid="stAppViewContainer"], .block-container {
-          height: auto !important;
-          overflow: visible !important;
+          height: auto !important; overflow: visible !important;
       }
       @media (max-width: 768px) {
-        .block-container { padding-top: 0.5rem !important; padding-bottom: 6rem !important; }
+        .block-container { padding-top: .5rem !important; padding-bottom: 6rem !important; }
         h1 { font-size: 1.6rem !important; }
         h2 { font-size: 1.25rem !important; }
       }
+      /* Karty zespołów - widok ekranowy */
+      .team-card h3 { font-size: 1.4rem; margin: 0 0 .25rem 0; }
+      .team-card li { font-size: 1.15rem; line-height: 1.4; }
     </style>
     """, unsafe_allow_html=True)
+
+# Auto-scroll input na mobile (uczestnik)
+if locked_participant:
     import streamlit.components.v1 as components
     components.html("""
     <script>
@@ -92,9 +105,11 @@ def squash_spaces(s: str) -> str:
     return " ".join((s or "").split())
 
 def norm_name(s: str) -> str:
+    # bez ogonków, małe litery, zbite spacje
     return squash_spaces(strip_accents(s)).lower()
 
 def build_keys(first_name: str, last_name: str):
+    # akceptujemy "imie nazwisko" i "nazwisko imie"
     key1 = norm_name(f"{first_name} {last_name}")
     key2 = norm_name(f"{last_name} {first_name}")
     return {key1, key2}
@@ -120,13 +135,124 @@ def make_qr_png(data: str) -> BytesIO:
     buf.seek(0)
     return buf
 
+# ---------- PowerPoint: generator prezentacji ----------
+def _font_size_for_count(n_total: int) -> int:
+    if n_total <= 10:   return 36
+    if n_total <= 16:   return 30
+    if n_total <= 24:   return 26
+    if n_total <= 32:   return 22
+    return 20
+
+def make_pptx(teams, title="Losowanie Zespołów") -> BytesIO:
+    prs = Presentation()  # 16:9
+    prs.slide_width  = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+
+    # Slajd tytułowy
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    slide.shapes.title.text = title
+    try:
+        slide.placeholders[1].text = datetime.now().strftime("Wyniki losowania · %Y-%m-%d %H:%M")
+    except Exception:
+        pass
+
+    # Slajdy zespołów
+    for i, team in enumerate(teams):
+        names = [f"{p['Nazwisko']} {p['Imię']}" for p in team]
+        names.sort()
+        slide = prs.slides.add_slide(prs.slide_layouts[5])  # blank
+
+        # Tytuł slajdu
+        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.33), Inches(1.0))
+        tf = title_box.text_frame
+        tf.text = f"Zespół {i+1}"
+        p0 = tf.paragraphs[0]
+        p0.font.size = Pt(44)
+        p0.font.bold = True
+
+        # Jedna lub dwie kolumny
+        if len(names) > 14:
+            split = (len(names) + 1) // 2
+            columns = [names[:split], names[split:]]
+            col_width = Inches(6.0)
+        else:
+            columns = [names]
+            col_width = Inches(12.33)
+
+        base_top = Inches(1.3)
+        left = Inches(0.5)
+        total = len(names)
+        font_pt = _font_size_for_count(total)
+
+        for c_idx, col_names in enumerate(columns):
+            box = slide.shapes.add_textbox(left + c_idx * col_width, base_top, col_width, Inches(5.8))
+            tf = box.text_frame
+            tf.clear()
+            for idx, nm in enumerate(col_names):
+                if idx == 0:
+                    p = tf.paragraphs[0]
+                    p.text = nm
+                else:
+                    p = tf.add_paragraph()
+                    p.text = nm
+                p.level = 0
+                p.font.size = Pt(font_pt)
+
+    out = BytesIO()
+    prs.save(out)
+    out.seek(0)
+    return out
+
+# ---------- Widok ekranowy (prezentacja) ----------
+def _chunks(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
+
+def render_screen_all_teams(teams, per_row=7):
+    """Wyświetl wszystkie zespoły w siatce (jedna strona) – same nazwiska i imiona."""
+    if not teams:
+        st.warning("Brak opublikowanych wyników.")
+        return
+    K = len(teams)
+    per_row = max(1, min(per_row, 8 if K >= 8 else K))
+    for idxs in _chunks(list(range(K)), per_row):
+        cols = st.columns(len(idxs))
+        for c, i in enumerate(idxs):
+            with cols[c].container():
+                st.markdown(f"<div class='team-card'><h3>👥 Zespół {i+1}</h3></div>", unsafe_allow_html=True)
+                for p in teams[i]:
+                    st.markdown(f"- {p['Nazwisko']} {p['Imię']}")
+
+def maybe_autorefresh():
+    ref = st.query_params.get("refresh", "")
+    try:
+        sec = int(ref)
+    except Exception:
+        sec = 0
+    if sec > 0:
+        import streamlit.components.v1 as components
+        components.html(f"""
+        <script>
+          setTimeout(function() {{ window.parent.location.reload(); }}, {sec*1000});
+        </script>
+        """, height=0)
+
+def get_int_param(name: str, default: int) -> int:
+    val = st.query_params.get(name, "")
+    try:
+        return int(val)
+    except Exception:
+        return default
+
 expected_cols_map = {
     'lp': 'Lp.','nazwisko': 'Nazwisko','imię': 'Imię','imi': 'Imię',
     'stanowisko': 'Stanowisko','dział': 'DZIAŁ','dzial': 'DZIAŁ'
 }
 
-# =================== Blokada trybu organizatora ===================
-if locked_participant:
+# =================== Wybór trybu (screen tylko z URL) ===================
+if locked_screen:
+    mode = "🖥️ Ekran"
+elif locked_participant:
     mode = "🔍 Uczestnik"
 else:
     mode = st.radio("Wybierz tryb", ["🎛️ Organizator", "🔍 Uczestnik"])
@@ -162,47 +288,40 @@ if mode == "🎛️ Organizator":
                     N = len(participants)
                     K = num_teams
 
-                    # Docelowe rozmiary zespołów (różnica ≤ 1)
+                    # Docelowe rozmiary (różnica ≤ 1)
                     base = N // K
                     extra = N % K
                     targets = [base + (1 if i < extra else 0) for i in range(K)]
 
-                    # Puste zespoły + licznik zajętości
                     teams = [[] for _ in range(K)]
                     sizes = [0] * K
 
-                    # Aby nie faworyzować kolejności działów – tasujemy ich listę
+                    # Tasujemy kolejność działów, a w każdym dziale – osoby
                     depts = list(participants.groupby("DZIAŁ"))
                     random.shuffle(depts)
 
-                    # Przydział działami – rundami – z poszanowaniem capacity (targets)
                     for dept, group in depts:
-                        members = group.sample(frac=1).to_dict("records")  # tasujemy osoby w dziale
-                        # RUNDY: najpierw po 1 na zespół (z capacity), potem nadwyżki
+                        members = group.sample(frac=1).to_dict("records")
+                        # Rundy: najpierw po jednej do zespołów mających wolne miejsca, potem nadwyżki
                         while members:
-                            # kandydaci: zespoły z wolnym miejscem
                             candidates = [i for i in range(K) if sizes[i] < targets[i]]
                             if not candidates:
-                                # teoretycznie nie powinno się zdarzyć, ale na wszelki wypadek
                                 candidates = list(range(K))
-                            random.shuffle(candidates)  # aby nadwyżki szły losowo
+                            random.shuffle(candidates)
                             for ti in candidates:
                                 if not members:
                                     break
-                                # przydziel 1 osobę z tego działu do zespołu 'ti'
                                 person = members.pop()
                                 teams[ti].append(person)
                                 sizes[ti] += 1
-                                # nie dodajemy więcej z tego działu do tego zespołu w tej rundzie,
-                                # bo idziemy dalej po kandydatach -> "po jednej zanim zaczniemy dublować"
 
-                    # Sortowanie w zespołach po nazwisku do prezentacji/eksportu
+                    # Sort po nazwisku
                     for i in range(K):
                         teams[i] = sorted(teams[i], key=lambda x: x["Nazwisko"])
 
                     st.session_state["balanced_teams"] = teams
 
-                # podgląd + publikacja
+                # podgląd + publikacja + eksporty
                 if st.session_state.get("balanced_teams"):
                     teams = st.session_state["balanced_teams"]
                     K = len(teams)
@@ -212,7 +331,7 @@ if mode == "🎛️ Organizator":
                     for i, col in enumerate(cols):
                         col.markdown(f"### 👥 Zespół {i+1}")
                         for p in teams[i]:
-                            # BEZ DZIAŁU
+                            # Bez działu
                             col.markdown(f"- {p['Nazwisko']} {p['Imię']}")
 
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
@@ -221,24 +340,39 @@ if mode == "🎛️ Organizator":
                         STORE["team_lookup"]      = lookup
                         STORE["all_keys"]         = keys
                         STORE["display_name_map"] = display_map
-                        st.success("✅ Opublikowano! Poniżej link i QR tylko dla uczestników.")
+                        st.success("✅ Opublikowano! Poniżej linki i QR.")
 
                     if STORE["team_lookup"]:
                         st.markdown("---")
-                        st.markdown("### 🔗 Link i QR dla uczestników (tylko wyszukiwarka)")
+                        st.markdown("### 🔗 Linki i QR")
+
+                        # Link dla uczestników (tylko wyszukiwarka)
                         base_url = st.text_input(
                             "Wklej adres Twojej aplikacji (bez parametrów):",
                             placeholder="https://twoja-nazwa.streamlit.app"
                         )
+
                         if base_url:
                             participant_url = base_url.rstrip("/") + "/?view=ucz"
+                            st.markdown("**Uczestnicy (wyszukiwarka):**")
                             st.code(participant_url, language="text")
-                            png = make_qr_png(participant_url)
-                            st.image(png, caption="QR dla uczestników")
-                            st.download_button("📥 Pobierz QR (PNG)", data=png,
+                            png_u = make_qr_png(participant_url)
+                            st.image(png_u, caption="QR dla uczestników")
+                            st.download_button("📥 Pobierz QR (uczestnik, PNG)", data=png_u,
                                 file_name="qr_uczestnik.png", mime="image/png")
 
-                        # eksport XLSX (dla organizatora pełne dane)
+                            # Link dla ekranu/prezentacji (wszystkie zespoły na 1 stronie)
+                            cols_param = st.number_input("Ile kolumn w widoku ekranu (1–8)", min_value=1, max_value=8, value=min(7, K))
+                            refresh_param = st.number_input("Auto-odświeżanie (sekundy, 0 = wyłączone)", min_value=0, max_value=3600, value=20)
+                            screen_url = base_url.rstrip("/") + f"/?view=screen&cols={int(cols_param)}&refresh={int(refresh_param)}"
+                            st.markdown("**Ekran (wszystkie zespoły na jednej stronie):**")
+                            st.code(screen_url, language="text")
+                            png_s = make_qr_png(screen_url)
+                            st.image(png_s, caption="QR dla ekranu/prezentacji")
+                            st.download_button("📥 Pobierz QR (ekran, PNG)", data=png_s,
+                                file_name="qr_ekran.png", mime="image/png")
+
+                        # Eksport XLSX
                         def to_excel(teams):
                             out = BytesIO()
                             with pd.ExcelWriter(out, engine='openpyxl') as w:
@@ -251,10 +385,28 @@ if mode == "🎛️ Organizator":
                             "wyniki_losowania.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+                        # Eksport PowerPoint
+                        pptx_bytes = make_pptx(teams, title="Losowanie Zespołów")
+                        st.download_button(
+                            "📽️ Pobierz prezentację PowerPoint (PPTX)",
+                            data=pptx_bytes,
+                            file_name=f"losowanie_zespolow_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        )
+
                     if st.button("🚪 Wyloguj organizatora"):
                         st.session_state["authed"] = False
                         st.success("Wylogowano.")
                         st.rerun()
+
+# ========================== EKRAN (prezentacja) ==========================
+if mode == "🖥️ Ekran":
+    maybe_autorefresh()
+    if not STORE.get("balanced_teams"):
+        st.warning("🔒 Wyniki nie są jeszcze opublikowane przez organizatora.")
+    else:
+        per_row = get_int_param("cols", default=7)
+        render_screen_all_teams(STORE["balanced_teams"], per_row=per_row)
 
 # ========================== UCZESTNIK ==========================
 if mode == "🔍 Uczestnik":
@@ -292,5 +444,4 @@ if mode == "🔍 Uczestnik":
             st.success(f"✅ Jesteś w Zespole {info['team_number']}")
             st.markdown("👥 **Skład zespołu:**")
             for m in info["team_members"]:
-                # BEZ DZIAŁU
                 st.markdown(f"- {m['Nazwisko']} {m['Imię']}")
