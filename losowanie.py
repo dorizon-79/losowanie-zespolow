@@ -15,25 +15,24 @@ import unicodedata
 import difflib
 import qrcode
 
-# ============ Prosta autoryzacja ============
-PASSWORD = st.secrets.get("APP_PASSWORD", "warsztaty")
+# =================== Hasło tylko dla organizatora ===================
+ORGANIZER_PASSWORD = st.secrets.get("ORGANIZER_PASSWORD", "warsztaty")
 
-def check_password() -> bool:
+def require_organizer_password():
+    """Wyświetla formularz hasła dla organizatora. Uczestnik nie jest blokowany."""
     if st.session_state.get("authed", False):
-        return True
-    st.markdown("### 🔒 Dostęp chroniony hasłem")
+        return
+    st.markdown("### 🔒 Dostęp organizatora")
     with st.form("login"):
         pwd = st.text_input("Hasło", type="password", placeholder="wpisz hasło…")
         ok = st.form_submit_button("Zaloguj")
     if ok:
-        if pwd == PASSWORD:
+        if pwd == ORGANIZER_PASSWORD:
             st.session_state["authed"] = True
             st.rerun()
         else:
             st.error("Nieprawidłowe hasło.")
     st.stop()
-
-check_password()
 
 # Krótszy tytuł w widoku uczestnika (telefon), pełny u organizatora
 title_text = "👥 Losowanie Zespołów" if locked_participant else "👥 Losowanie osób do zespołów"
@@ -137,6 +136,9 @@ else:
 
 # ========================== ORGANIZATOR ==========================
 if mode == "🎛️ Organizator":
+    # <<< hasło tylko w tym widoku >>>
+    require_organizer_password()
+
     uploaded_file = st.file_uploader("📂 Wybierz plik Excel (.xlsx) z listą osób", type=["xlsx"])
 
     if uploaded_file:
@@ -192,7 +194,7 @@ if mode == "🎛️ Organizator":
                     for i, col in enumerate(cols):
                         col.markdown(f"### 👥 Zespół {i+1}")
                         for p in st.session_state["balanced_teams"][i]:
-                            # ⬇️ BEZ DZIAŁU
+                            # BEZ DZIAŁU
                             col.markdown(f"- {p['Nazwisko']} {p['Imię']}")
 
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
@@ -218,7 +220,7 @@ if mode == "🎛️ Organizator":
                             st.download_button("📥 Pobierz QR (PNG)", data=png,
                                 file_name="qr_uczestnik.png", mime="image/png")
 
-                        # eksport XLSX (dla organizatora nadal pełne dane – jeśli chcesz, też mogę okroić)
+                        # eksport XLSX (dla organizatora pełne dane – jeśli chcesz, mogę okroić)
                         def to_excel(teams):
                             out = BytesIO()
                             with pd.ExcelWriter(out, engine='openpyxl') as w:
@@ -230,6 +232,12 @@ if mode == "🎛️ Organizator":
                             to_excel(st.session_state["balanced_teams"]),
                             "wyniki_losowania.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+                    # Opcjonalnie: wylogowanie organizatora
+                    if st.button("🚪 Wyloguj organizatora"):
+                        st.session_state["authed"] = False
+                        st.success("Wylogowano.")
+                        st.rerun()
 
 # ========================== UCZESTNIK ==========================
 if mode == "🔍 Uczestnik":
@@ -264,5 +272,5 @@ if mode == "🔍 Uczestnik":
             st.success(f"✅ Jesteś w Zespole {info['team_number']}")
             st.markdown("👥 **Skład zespołu:**")
             for m in info["team_members"]:
-                # ⬇️ BEZ DZIAŁU
+                # BEZ DZIAŁU
                 st.markdown(f"- {m['Nazwisko']} {m['Imię']}")
