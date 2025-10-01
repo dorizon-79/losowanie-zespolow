@@ -192,7 +192,8 @@ if mode == "🎛️ Organizator":
                     for i, col in enumerate(cols):
                         col.markdown(f"### 👥 Zespół {i+1}")
                         for p in st.session_state["balanced_teams"][i]:
-                            col.markdown(f"- {p['Nazwisko']} {p['Imię']} ({p['DZIAŁ']})")
+                            # ⬇️ BEZ DZIAŁU
+                            col.markdown(f"- {p['Nazwisko']} {p['Imię']}")
 
                     if st.button("📣 Opublikuj wyniki dla uczestników"):
                         lookup, keys, display_map = build_lookup_from_teams(st.session_state["balanced_teams"])
@@ -217,7 +218,7 @@ if mode == "🎛️ Organizator":
                             st.download_button("📥 Pobierz QR (PNG)", data=png,
                                 file_name="qr_uczestnik.png", mime="image/png")
 
-                        # eksport XLSX
+                        # eksport XLSX (dla organizatora nadal pełne dane – jeśli chcesz, też mogę okroić)
                         def to_excel(teams):
                             out = BytesIO()
                             with pd.ExcelWriter(out, engine='openpyxl') as w:
@@ -263,4 +264,5 @@ if mode == "🔍 Uczestnik":
             st.success(f"✅ Jesteś w Zespole {info['team_number']}")
             st.markdown("👥 **Skład zespołu:**")
             for m in info["team_members"]:
-                st.markdown(f"- {m['Nazwisko']} {m['Imię']} ({m['DZIAŁ']})")
+                # ⬇️ BEZ DZIAŁU
+                st.markdown(f"- {m['Nazwisko']} {m['Imię']}")
