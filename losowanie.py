@@ -5,7 +5,7 @@ view_param = (st.query_params.get("view", "") or "").lower()
 locked_participant = view_param in {"ucz", "participant", "u", "p"}
 locked_screen      = view_param in {"screen", "prezentacja", "ekran"}  # widok prezentacyjny
 
-# 👉 EKRAN = wide, UCZESTNIK = centered, reszta = wide
+# EKRAN = wide (pełne płótno), UCZESTNIK = centered, reszta = wide
 layout_mode = "wide" if locked_screen else ("centered" if locked_participant else "wide")
 st.set_page_config(page_title="Losowanie zespołów", layout=layout_mode)
 
@@ -44,31 +44,60 @@ def require_organizer_password():
 title_text = "👥 Losowanie Zespołów" if (locked_participant or locked_screen) else "👥 Losowanie osób do zespołów"
 st.title(title_text)
 
-# --- Usprawnienia mobilne i ekranowe ---
+# --------- Parametry prezentacyjne z URL ---------
+def get_int_param(name: str, default: int) -> int:
+    val = st.query_params.get(name, "")
+    try:
+        return int(val)
+    except Exception:
+        return default
+
+cols_param   = get_int_param("cols", 7)       # ile kolumn w widoku screen
+refresh_sec  = get_int_param("refresh", 0)    # auto-odświeżanie (0 = off)
+scale_param  = get_int_param("scale", 100)    # skala fontów w % (np. 90 = 90%)
+
+# --- Usprawnienia mobilne i EKRAN 1920x1080 ---
 if locked_participant or locked_screen:
-    # 👉 dla EKRANU: pełna szerokość, brak max-width, responsywne fonty
+    scale_factor = max(50, min(140, scale_param)) / 100.0  # 50–140%
+    # dla ekranu 1920x1080: max-width 1920, wyśrodkowane, responsywne fonty
     st.markdown(f"""
     <style>
       [data-testid="stToolbar"], footer {{ display: none !important; }}
-      header {{ visibility: hidden; }} /* pasek tytułu Streamlit */
-      /* pełna szerokość kontenera */
+      header {{ visibility: hidden; }}
+      :root {{ --s: {scale_factor}; }}
+
+      /* kontener: środek + max 1920px */
       .block-container {{
-          max-width: 100vw !important;
-          padding-left: 1rem !important;
-          padding-right: 1rem !important;
-          padding-top: 0.5rem !important;
-          padding-bottom: 2rem !important;
+          max-width: 1920px !important;
+          margin-left: auto !important;
+          margin-right: auto !important;
+          padding-left: 12px !important;
+          padding-right: 12px !important;
+          padding-top: 6px !important;
+          padding-bottom: 12px !important;
       }}
       [data-testid="stAppViewContainer"] {{ padding: 0 !important; }}
 
-      /* tytuły responsywnie */
-      h1 {{ font-size: clamp(18px, 2.2vw, 36px) !important; margin: .2rem 0 1rem; }}
-      .team-card h3 {{ font-size: clamp(16px, 1.4vw, 24px); margin: 0 0 .25rem 0; }}
-      .team-card ul {{ margin: .25rem 0 .75rem 1.1rem; padding: 0; }}
-      .team-card li {{ font-size: clamp(12px, 1.05vw, 18px); line-height: 1.35; margin: .1rem 0; }}
-      @media (max-width: 768px) {{
-        .block-container {{ padding-bottom: 6rem !important; }}
-        h1 {{ font-size: 1.6rem !important; }}
+      /* tytuły i listy – responsywnie + możliwość globalnej skali (--s) */
+      h1 {{
+        font-size: calc(var(--s) * clamp(22px, 2.2vw, 40px)) !important;
+        margin: .2rem 0 1rem;
+      }}
+      .team-card h3 {{
+        font-size: calc(var(--s) * clamp(18px, 1.6vw, 26px));
+        margin: 0 0 .35rem 0;
+      }}
+      .team-card ul {{ margin: .2rem 0 .7rem 1.1rem; padding: 0; }}
+      .team-card li {{
+        font-size: calc(var(--s) * clamp(13px, 1.05vw, 20px));
+        line-height: 1.35; margin: .1rem 0;
+        word-break: break-word;
+      }}
+
+      /* dopasowanie do 1080p – bez poziomego scrolla */
+      html, body {{ overflow-x: hidden; }}
+      @media (max-width: 1366px) {{
+        .team-card li {{ font-size: calc(var(--s) * clamp(12px, 1.0vw, 18px)); }}
       }}
     </style>
     """, unsafe_allow_html=True)
@@ -114,11 +143,9 @@ def squash_spaces(s: str) -> str:
     return " ".join((s or "").split())
 
 def norm_name(s: str) -> str:
-    # bez ogonków, małe litery, zbite spacje
     return squash_spaces(strip_accents(s)).lower()
 
 def build_keys(first_name: str, last_name: str):
-    # akceptujemy "imie nazwisko" i "nazwisko imie"
     key1 = norm_name(f"{first_name} {last_name}")
     key2 = norm_name(f"{last_name} {first_name}")
     return {key1, key2}
@@ -145,9 +172,6 @@ def make_qr_png(data: str) -> BytesIO:
     return buf
 
 # ---------- PowerPoint: generator prezentacji ----------
-from pptx import Presentation
-from pptx.util import Inches, Pt
-
 def _font_size_for_count(n_total: int) -> int:
     if n_total <= 10:   return 36
     if n_total <= 16:   return 30
@@ -160,30 +184,22 @@ def make_pptx(teams, title="Losowanie Zespołów") -> BytesIO:
     prs.slide_width  = Inches(13.33)
     prs.slide_height = Inches(7.5)
 
-    # Slajd tytułowy
     slide = prs.slides.add_slide(prs.slide_layouts[0])
     slide.shapes.title.text = title
     try:
-        from datetime import datetime
         slide.placeholders[1].text = datetime.now().strftime("Wyniki losowania · %Y-%m-%d %H:%M")
     except Exception:
         pass
 
-    # Slajdy zespołów
     for i, team in enumerate(teams):
         names = [f"{p['Nazwisko']} {p['Imię']}" for p in team]
         names.sort()
         slide = prs.slides.add_slide(prs.slide_layouts[5])  # blank
-
-        # Tytuł slajdu
         title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.33), Inches(1.0))
         tf = title_box.text_frame
         tf.text = f"Zespół {i+1}"
-        p0 = tf.paragraphs[0]
-        p0.font.size = Pt(44)
-        p0.font.bold = True
+        p0 = tf.paragraphs[0]; p0.font.size = Pt(44); p0.font.bold = True
 
-        # Jedna lub dwie kolumny
         if len(names) > 14:
             split = (len(names) + 1) // 2
             columns = [names[:split], names[split:]]
@@ -194,27 +210,16 @@ def make_pptx(teams, title="Losowanie Zespołów") -> BytesIO:
 
         base_top = Inches(1.3)
         left = Inches(0.5)
-        total = len(names)
-        font_pt = _font_size_for_count(total)
+        font_pt = _font_size_for_count(len(names))
 
         for c_idx, col_names in enumerate(columns):
             box = slide.shapes.add_textbox(left + c_idx * col_width, base_top, col_width, Inches(5.8))
-            tf = box.text_frame
-            tf.clear()
+            tf = box.text_frame; tf.clear()
             for idx, nm in enumerate(col_names):
-                if idx == 0:
-                    p = tf.paragraphs[0]
-                    p.text = nm
-                else:
-                    p = tf.add_paragraph()
-                    p.text = nm
-                p.level = 0
-                p.font.size = Pt(font_pt)
+                p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
+                p.text = nm; p.level = 0; p.font.size = Pt(font_pt)
 
-    out = BytesIO()
-    prs.save(out)
-    out.seek(0)
-    return out
+    out = BytesIO(); prs.save(out); out.seek(0); return out
 
 # ---------- Widok ekranowy (prezentacja) ----------
 def _chunks(lst, n):
@@ -237,25 +242,13 @@ def render_screen_all_teams(teams, per_row=7):
                     st.markdown(f"- {p['Nazwisko']} {p['Imię']}")
 
 def maybe_autorefresh():
-    ref = st.query_params.get("refresh", "")
-    try:
-        sec = int(ref)
-    except Exception:
-        sec = 0
-    if sec > 0:
+    if refresh_sec > 0:
         import streamlit.components.v1 as components
         components.html(f"""
         <script>
-          setTimeout(function() {{ window.parent.location.reload(); }}, {sec*1000});
+          setTimeout(function() {{ window.parent.location.reload(); }}, {refresh_sec*1000});
         </script>
         """, height=0)
-
-def get_int_param(name: str, default: int) -> int:
-    val = st.query_params.get(name, "")
-    try:
-        return int(val)
-    except Exception:
-        return default
 
 expected_cols_map = {
     'lp': 'Lp.','nazwisko': 'Nazwisko','imię': 'Imię','imi': 'Imię',
@@ -298,46 +291,34 @@ if mode == "🎛️ Organizator":
 
                 if st.button("🎯 Rozlosuj zespoły"):
                     participants = df.copy()
-                    N = len(participants)
-                    K = num_teams
-
-                    # Docelowe rozmiary (różnica ≤ 1)
-                    base = N // K
-                    extra = N % K
+                    N = len(participants); K = num_teams
+                    base = N // K; extra = N % K
                     targets = [base + (1 if i < extra else 0) for i in range(K)]
 
                     teams = [[] for _ in range(K)]
                     sizes = [0] * K
 
-                    # Tasujemy kolejność działów, a w każdym dziale – osoby
                     depts = list(participants.groupby("DZIAŁ"))
                     random.shuffle(depts)
 
                     for dept, group in depts:
                         members = group.sample(frac=1).to_dict("records")
-                        # Rundy: najpierw po jednej do zespołów mających wolne miejsca, potem nadwyżki
                         while members:
                             candidates = [i for i in range(K) if sizes[i] < targets[i]]
                             if not candidates:
                                 candidates = list(range(K))
                             random.shuffle(candidates)
                             for ti in candidates:
-                                if not members:
-                                    break
+                                if not members: break
                                 person = members.pop()
-                                teams[ti].append(person)
-                                sizes[ti] += 1
+                                teams[ti].append(person); sizes[ti] += 1
 
-                    # Sort po nazwisku
                     for i in range(K):
                         teams[i] = sorted(teams[i], key=lambda x: x["Nazwisko"])
-
                     st.session_state["balanced_teams"] = teams
 
-                # podgląd + publikacja + eksporty
                 if st.session_state.get("balanced_teams"):
-                    teams = st.session_state["balanced_teams"]
-                    K = len(teams)
+                    teams = st.session_state["balanced_teams"]; K = len(teams)
 
                     st.markdown("### 📋 Podgląd zespołów")
                     cols = st.columns(K)
@@ -355,10 +336,8 @@ if mode == "🎛️ Organizator":
                         st.success("✅ Opublikowano! Poniżej linki i QR.")
 
                     if STORE["team_lookup"]:
-                        st.markdown("---")
-                        st.markdown("### 🔗 Linki i QR")
+                        st.markdown("---"); st.markdown("### 🔗 Linki i QR")
 
-                        # Link dla uczestników (tylko wyszukiwarka)
                         base_url = st.text_input(
                             "Wklej adres Twojej aplikacji (bez parametrów):",
                             placeholder="https://twoja-nazwa.streamlit.app"
@@ -373,11 +352,8 @@ if mode == "🎛️ Organizator":
                             st.download_button("📥 Pobierz QR (uczestnik, PNG)", data=png_u,
                                 file_name="qr_uczestnik.png", mime="image/png")
 
-                            # Link dla ekranu/prezentacji (wszystkie zespoły na 1 stronie)
-                            cols_param = st.number_input("Ile kolumn w widoku ekranu (1–8)", min_value=1, max_value=8, value=min(7, K))
-                            refresh_param = st.number_input("Auto-odświeżanie (sekundy, 0 = wyłączone)", min_value=0, max_value=3600, value=20)
-                            screen_url = base_url.rstrip("/") + f"/?view=screen&cols={int(cols_param)}&refresh={int(refresh_param)}"
-                            st.markdown("**Ekran (wszystkie zespoły na jednej stronie):**")
+                            screen_url = base_url.rstrip("/") + f"/?view=screen&cols={int(cols_param)}&refresh={int(refresh_sec)}&scale={int(scale_param)}"
+                            st.markdown("**Ekran (wszystkie zespoły na jednej stronie, 1920×1080):**")
                             st.code(screen_url, language="text")
                             png_s = make_qr_png(screen_url)
                             st.image(png_s, caption="QR dla ekranu/prezentacji")
@@ -408,17 +384,20 @@ if mode == "🎛️ Organizator":
 
                     if st.button("🚪 Wyloguj organizatora"):
                         st.session_state["authed"] = False
-                        st.success("Wylogowano.")
-                        st.rerun()
+                        st.success("Wylogowano."); st.rerun()
 
 # ========================== EKRAN (prezentacja) ==========================
 if mode == "🖥️ Ekran":
-    maybe_autorefresh()
+    if refresh_sec > 0:
+        import streamlit.components.v1 as components
+        components.html(f"""
+        <script> setTimeout(function(){{ window.parent.location.reload(); }}, {refresh_sec*1000}); </script>
+        """, height=0)
+
     if not STORE.get("balanced_teams"):
         st.warning("🔒 Wyniki nie są jeszcze opublikowane przez organizatora.")
     else:
-        per_row = get_int_param("cols", default=7)
-        render_screen_all_teams(STORE["balanced_teams"], per_row=per_row)
+        render_screen_all_teams(STORE["balanced_teams"], per_row=cols_param)
 
 # ========================== UCZESTNIK ==========================
 if mode == "🔍 Uczestnik":
@@ -430,8 +409,7 @@ if mode == "🔍 Uczestnik":
         selected_key = None
         info = None
 
-        def norm_query(q: str) -> str:
-            return norm_name(q)
+        def norm_query(q: str) -> str: return norm_name(q)
 
         if full_name_in:
             key = norm_query(full_name_in)
